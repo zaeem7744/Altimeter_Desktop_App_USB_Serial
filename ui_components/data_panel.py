@@ -2,7 +2,7 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QTextEdit, QCheckBox, QGroupBox, QTabWidget, 
                              QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QFileDialog)
-from PyQt6.QtCore import pyqtSignal, QEvent, Qt
+from PyQt6.QtCore import pyqtSignal, QEvent, Qt, QTimer
 from PyQt6.QtGui import QFont
 import pyqtgraph as pg
 import numpy as np
@@ -186,13 +186,17 @@ class DataPanel(QWidget):
     auto_scroll_changed = pyqtSignal(bool)
     clear_logs_requested = pyqtSignal()
     save_logs_requested = pyqtSignal()
-    
+    clear_requested = pyqtSignal()
+
     def __init__(self):
         super().__init__()
         self.flight_viz = None  # Will be set later
         self._last_x_max = None
         self._last_y_min = None
         self._last_y_max = None
+        # Logging options
+        self._log_show_timestamps = True
+        self._log_max_width = 96
         self.setup_ui()
         
     def setup_ui(self):
@@ -260,14 +264,21 @@ class DataPanel(QWidget):
             lambda state: self.auto_scroll_changed.emit(state == 2)
         )
         log_controls.addWidget(self.auto_scroll_check)
+
+        self.show_timestamps_check = QCheckBox("Show timestamps")
+        self.show_timestamps_check.setChecked(True)
+        self.show_timestamps_check.stateChanged.connect(
+            lambda state: setattr(self, "_log_show_timestamps", state == 2)
+        )
+        log_controls.addWidget(self.show_timestamps_check)
         
-        btn_clear_logs = QPushButton("Clear Logs")
-        btn_clear_logs.clicked.connect(self.clear_logs_requested.emit)
-        log_controls.addWidget(btn_clear_logs)
+        self.btn_clear_logs = QPushButton("Clear Logs")
+        self.btn_clear_logs.clicked.connect(self._on_clear_logs_clicked)
+        log_controls.addWidget(self.btn_clear_logs)
         
-        btn_save_logs = QPushButton("Save Logs")
-        btn_save_logs.clicked.connect(self.save_logs_requested.emit)
-        log_controls.addWidget(btn_save_logs)
+        self.btn_save_logs = QPushButton("Save Logs")
+        self.btn_save_logs.clicked.connect(self._on_save_logs_clicked)
+        log_controls.addWidget(self.btn_save_logs)
         
         log_controls.addStretch()
         layout.addLayout(log_controls)
@@ -321,13 +332,18 @@ class DataPanel(QWidget):
         
         # Controls above the plot
         controls = QHBoxLayout()
-        btn_set_origin = QPushButton("Set Origin (0,0)")
-        btn_set_origin.clicked.connect(self.on_set_origin)
-        controls.addWidget(btn_set_origin)
+        self.btn_set_origin = QPushButton("Set Origin (0,0)")
+        self.btn_set_origin.clicked.connect(self.on_set_origin)
+        controls.addWidget(self.btn_set_origin)
 
-        btn_save_graph = QPushButton("Save Graph")
-        btn_save_graph.clicked.connect(self.on_save_graph)
-        controls.addWidget(btn_save_graph)
+        self.btn_save_graph = QPushButton("Save Graph")
+        self.btn_save_graph.clicked.connect(self.on_save_graph)
+        controls.addWidget(self.btn_save_graph)
+
+        self.btn_clear = QPushButton("Clear")
+        self.btn_clear.setStyleSheet("background-color: #f97316; color: white;")
+        self.btn_clear.clicked.connect(self._on_clear_clicked)
+        controls.addWidget(self.btn_clear)
 
         # Gravity toggle (net vs total accel), mirrors python_app MainWindow
         self.gravity_toggle = QCheckBox("Net accel (gravity removed)")
@@ -451,8 +467,29 @@ class DataPanel(QWidget):
 
         return container
 
-    def add_log_message(self, message):
-        self.communication_log.append(message)
+    def _flash_button(self, button, highlight_css: str = "background-color: #1d4ed8; color: white;") -> None:
+        """Temporarily tint a button to provide click feedback."""
+        if not button:
+            return
+        original = button.styleSheet()
+        combined = f"{original}; {highlight_css}" if original else highlight_css
+        button.setStyleSheet(combined)
+        QTimer.singleShot(150, lambda: button.setStyleSheet(original))
+
+    def add_log_message(self, message: str) -> None:
+        if message is None:
+            return
+        text = str(message)
+        # Support multi-line messages
+        lines = text.splitlines() or [""]
+        for line in lines:
+            entry = line
+            if self._log_show_timestamps:
+                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                entry = f"[{ts}] {line}"
+            if self._log_max_width and len(entry) > self._log_max_width:
+                entry = entry[: self._log_max_width - 3] + "..."
+            self.communication_log.append(entry)
         
     def clear_logs(self):
         self.communication_log.clear()
@@ -679,6 +716,10 @@ class DataPanel(QWidget):
         
     def on_set_origin(self):
         """Reset/align view to origin and altitude extents"""
+        # Provide visual feedback when invoked from the button
+        sender = self.sender()
+        if isinstance(sender, QPushButton):
+            self._flash_button(sender)
         try:
             if self._last_time is not None and self._last_alt_min is not None and self._last_alt_max is not None:
                 self.alt_plot.setXRange(0, self._last_time, padding=0.05)
@@ -690,6 +731,9 @@ class DataPanel(QWidget):
         
     def on_save_graph(self):
         """Save graphs as images with multiple options (alt/vel/acc/all/combined)."""
+        sender = self.sender()
+        if isinstance(sender, QPushButton):
+            self._flash_button(sender)
         from PyQt6.QtWidgets import QInputDialog
         from datetime import datetime
         options = [
@@ -768,3 +812,15 @@ class DataPanel(QWidget):
         self.sample_rate_hz = rate_hz
         if "sample_rate" in self.stats_labels and rate_hz is not None:
             self.stats_labels["sample_rate"].setText(f"{rate_hz} Hz")
+
+    def _on_clear_logs_clicked(self) -> None:
+        self._flash_button(self.btn_clear_logs, "background-color: #ef4444; color: white;")
+        self.clear_logs_requested.emit()
+
+    def _on_save_logs_clicked(self) -> None:
+        self._flash_button(self.btn_save_logs)
+        self.save_logs_requested.emit()
+
+    def _on_clear_clicked(self) -> None:
+        self._flash_button(self.btn_clear, "background-color: #f97316; color: white;")
+        self.clear_requested.emit()

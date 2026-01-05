@@ -61,7 +61,7 @@ class TelemetryDashboard(QMainWindow):
         self._file_session_id = None  # optional session identifier from FILEINFO
         
     def setup_ui(self):
-        self.setWindowTitle("Rocket Telemetry System - Flash Storage Dashboard")
+        self.setWindowTitle("Altimeter Flight Data Viewer - Flash Storage Dashboard")
         
         # Set window size to fit screen with 16:9 aspect ratio
         screen = QGuiApplication.primaryScreen()
@@ -115,6 +115,7 @@ class TelemetryDashboard(QMainWindow):
         self.control_panel.memory_erase_requested.connect(self.erase_memory)
         self.control_panel.extract_data_requested.connect(self.extract_data)
         self.control_panel.export_requested.connect(self.export_to_csv)
+        self.control_panel.import_csv_requested.connect(self.import_csv)
         self.control_panel.view_data_requested.connect(self.view_all_data)
         self.control_panel.sample_rate_apply_requested.connect(self.on_sample_rate_changed)
         
@@ -122,6 +123,7 @@ class TelemetryDashboard(QMainWindow):
         self.data_panel.auto_scroll_changed.connect(self.set_auto_scroll)
         self.data_panel.clear_logs_requested.connect(self.clear_logs)
         self.data_panel.save_logs_requested.connect(self.save_logs)
+        self.data_panel.clear_requested.connect(self.handle_refresh)
         
         # Update timer
         self.update_timer = QTimer()
@@ -140,9 +142,9 @@ class TelemetryDashboard(QMainWindow):
     def on_devices_found(self, devices):
         self.control_panel.update_devices_list(devices)
         if devices:
-            self.log_message(f"Found {len(devices)} RocketTelemetry device(s)")
+            self.log_message(f"Found {len(devices)} Altimeter device(s) on USB serial ports")
         else:
-            self.log_message("No RocketTelemetry devices found")
+            self.log_message("No Altimeter devices found on USB serial ports")
         
     @pyqtSlot(str)
     def on_scan_error(self, error_message):
@@ -150,78 +152,146 @@ class TelemetryDashboard(QMainWindow):
         QMessageBox.warning(self, "Scan Error", error_message)
         
     @pyqtSlot(str, str)
-    def on_connection_status(self, status, message):
+    def on_connection_status(self, status: str, message: str) -> None:
+        """Handle connection status updates from the serial manager."""
         self.control_panel.update_connection_status(status, message)
         self.log_message(message)
-        
+
         if status == "connected":
             self.is_connected = True
             self.connection_verified = True
-            # If an export was interrupted, we can choose to resume here.
-            # For now, just auto-check memory as before.
+            # After a successful connection, automatically query memory so the
+            # dashboard shows how full the flash is.
             QTimer.singleShot(1000, self.check_memory)
         elif status == "disconnected":
             self.is_connected = False
             self.connection_verified = False
-            # Mark export as interrupted but do not clear buffered data;
-            # user can restart extraction to resume from last completed chunk.
-            if self._file_export_active:
-                self.log_message(
-                    f"⚠️ Export interrupted at chunk {self._file_next_chunk}/"
-                    f"{self._file_total_chunks} (last complete={self._file_last_completed_chunk})"
-                )
+            if self.is_exporting_data:
+                self.log_message("⚠️ Export interrupted because the device was disconnected.")
+                self.is_exporting_data = False
+                self.data_panel.update_export_progress(0, 0)
+                self.control_panel.update_extract_progress(0, 0)
         elif status == "error":
-            self.log_message(f"⚠️ BLE Error: {message}")
-        
+            self.log_message("⚠️ Communication problem with the Altimeter. Please check the USB cable and port.")
+
     @pyqtSlot(str)
-    def on_data_received(self, data):
-        """Handle all incoming data from BLE - SIMPLIFIED AND FIXED"""
-        print(f"📨 DASHBOARD RECEIVED: '{data}'")
+    def on_data_received(self, data: str) -> None:
+        """Handle all incoming data from the Altimeter over USB serial.
 
-        # --- New: handle chunked file-style export (FINFO/FGET) -------------
-        if data.startswith("FILEINFO:"):
-            # Ignore if an export is already running
-            if self._file_export_active:
-                self.log_message("⚠️ Ignoring FILEINFO during active export")
-                return
+        The firmware streams human-readable text lines. For flash dumps
+        it sends a CSV header (time_s,...) followed by one CSV row per
+        sample and finishes with an '=== END FLASH DUMP ===' marker.
+        Other lines carry memory/config/status information.
+        """
+        line = (data or "").strip()
+        if not line:
+            return
 
-            # Parse totalSamples, samplesPerChunk, totalChunks, optional sessionId
-            try:
-                payload = data[len("FILEINFO:"):]
-                parts = dict(
-                    kv.split("=")
-                    for kv in payload.split(",")
-                    if "=" in kv
-                )
-                total_chunks = int(parts.get("totalChunks", "0"))
-                total_samples = int(parts.get("totalSamples", "0"))
-                spp = int(parts.get("samplesPerChunk", "0"))
-                session_id_str = parts.get("sessionId", "0")
-                try:
-                    session_id = int(session_id_str) if session_id_str else 0
-                except ValueError:
-                    session_id = 0
-            except Exception as exc:
-                self.log_message(f"❌ Failed to parse FILEINFO: {exc}")
-                return
+        print(f"📨 SERIAL RX: '{line}'")
 
-            if total_chunks <= 0 or spp <= 0:
-                self.log_message("❌ FILEINFO reported zero chunks or invalid chunk size")
-                return
+        # ------------------------------------------------------------------
+        # Heartbeat from firmware
+        # ------------------------------------------------------------------
+        if "DEVICE_ALIVE" in line:
+            print("💓 Heartbeat received")
+            if not self.is_connected or not self.connection_verified:
+                self.is_connected = True
+                self.connection_verified = True
+                self.control_panel.update_connection_status("connected", "Device connected")
+            return
 
-            self._file_export_active = True
-            self._file_total_chunks = total_chunks
-            self._file_session_id = session_id or None
-            # For now always perform a full export starting from chunk 0 so
-            # the desktop view exactly matches the device memory.
-            self._file_next_chunk = 0
-            self._file_last_completed_chunk = -1
-            self._file_total_samples = total_samples
-            self._file_samples_per_chunk = spp
+        # ------------------------------------------------------------------
+        # Memory status
+        # ------------------------------------------------------------------
+        if line.startswith("MEMORY:"):
+            self.process_memory_data(line)
+            return
 
-            # Reset CSV buffer
+        # ------------------------------------------------------------------
+        # Configuration (e.g. sample rate)
+        # ------------------------------------------------------------------
+        if line.startswith("CONFIG:"):
+            self.process_config_data(line)
+            return
+
+        # ------------------------------------------------------------------
+        # Flash memory cleared
+        # ------------------------------------------------------------------
+        if line == "MEMORY_CLEARED":
+            print("Memory cleared confirmation received")
+            self.data_manager.process_incoming_data(line)
+            memory_status = self.data_manager.get_memory_status()
+            self.control_panel.update_memory_display(memory_status)
+            self.data_panel.update_extracted_data_table(self.data_manager.get_flight_data())
+            self.data_panel.clear_visualization()
+            self.log_message("Memory cleared on device")
+            # Also reset progress indicators
+            self.data_panel.update_export_progress(0, 0)
+            self.control_panel.update_extract_progress(0, 0)
+            return
+
+        # ------------------------------------------------------------------
+        # Explicit "no data" response when flash is empty
+        # ------------------------------------------------------------------
+        if line in ("NO_DATA_IN_FLASH", "No data in flash"):
+            self.data_manager.clear_data()
+            self.data_panel.clear_visualization()
+            self.data_panel.update_extracted_data_table(self.data_manager.get_flight_data())
+            self.log_message("Device reports no stored samples in flash")
+            self.data_panel.update_export_progress(0, 0)
+            self.control_panel.update_extract_progress(0, 0)
+            return
+
+        # ------------------------------------------------------------------
+        # Start of CSV dump
+        # ------------------------------------------------------------------
+        if line.startswith("time_s,") or line.startswith("t_ms,") or line.startswith("timestamp,"):
+            # Reset state for a fresh dump
             self._ble_dump_active = True
-            self._ble_dump_lines = []
+            self._ble_dump_lines = [line]
+            self.is_exporting_data = True
+            self.exported_samples = 0
+
+            total = self.expected_samples if self.expected_samples > 0 else 0
+            self.data_panel.update_export_progress(0, total)
+            self.control_panel.update_extract_progress(0, total)
+            self.log_message("Starting data download from the Altimeter...")
+            return
+
+        # ------------------------------------------------------------------
+        # End of CSV dump
+        # ------------------------------------------------------------------
+        if line.startswith("=== END FLASH DUMP"):
+            self._ble_dump_active = False
+            self.is_exporting_data = False
+            if self._ble_dump_lines:
+                self._handle_ble_dump_complete()
+            else:
+                self.log_message("Flash dump ended but no CSV lines were received")
+                self.data_panel.update_export_progress(0, 0)
+                self.control_panel.update_extract_progress(0, 0)
+            return
+
+        # ------------------------------------------------------------------
+        # CSV sample line while a dump is active
+        # ------------------------------------------------------------------
+        if self._ble_dump_active and "," in line:
+            self._ble_dump_lines.append(line)
+            self.exported_samples += 1
+            total = self.expected_samples if self.expected_samples > 0 else self.exported_samples
+            self.data_panel.update_export_progress(self.exported_samples, total)
+            self.control_panel.update_extract_progress(self.exported_samples, total)
+            if self.exported_samples and self.exported_samples % 100 == 0:
+                self.log_message(f"Received {self.exported_samples} samples...")
+            return
+
+        # ------------------------------------------------------------------
+        # Fallback: delegate other lines to DataManager and log them
+        # ------------------------------------------------------------------
+        self.data_manager.process_incoming_data(line)
+
+        if not line.startswith("TELEMETRY:") and not line.startswith("STATUS:"):
+            self.log_message(line)
 
             session_part = f", session {self._file_session_id}" if self._file_session_id is not None else ""
             self.log_message(
@@ -253,6 +323,7 @@ class TelemetryDashboard(QMainWindow):
             self.control_panel.update_extract_progress(0, 1)
             return
 
+        """
         # Explicit "no data" message from firmware (sent instead of CSV)
         if data == "NO_DATA_IN_FLASH":
             # Clear any partial buffer and show a friendly message
@@ -431,6 +502,7 @@ class TelemetryDashboard(QMainWindow):
         if not data.startswith("TELEMETRY:") and not data.startswith("STATUS:"):
             self.log_message(f"📨 {data}")
 
+        """
     def _is_csv_data(self, data):
         """Check if data is CSV format"""
         if (',' in data and 
@@ -462,7 +534,12 @@ class TelemetryDashboard(QMainWindow):
         if processed_data and processed_data.get("data_type") == "memory":
             memory_status = self.data_manager.data_processor.get_memory_status(processed_data)
             self.control_panel.update_memory_display(memory_status)
-            self.log_message(f"💾 Memory: {memory_status['total_samples']} samples ({memory_status['usage_percent']}% used)")
+            # Remember how many samples are stored so progress bars can
+            # track real-time extraction progress during a dump.
+            self.expected_samples = memory_status.get("total_samples", 0)
+            self.log_message(
+                f"💾 Memory: {memory_status['total_samples']} samples ({memory_status['usage_percent']}% used)"
+            )
         else:
             print(f"❌ Failed to process memory data: {data}")
 
@@ -670,85 +747,89 @@ class TelemetryDashboard(QMainWindow):
         except Exception:
             pass
 
-        # Reuse existing handler to update tables, plots, stats, lab window
-        self.process_data_export_complete()
+        # Reuse existing handler to update tables, plots, stats, and message
+        self.process_data_export_complete(source="device")
 
         # Once processed, clear buffered lines so subsequent END markers or
         # retries won't re-run the same dataset.
         self._ble_dump_lines = []
         
-    def process_data_export_complete(self):
-        """Handle completion of data export - UPDATED WITH PROGRESS"""
+    def process_data_export_complete(self, source: str | None = None) -> None:
+        """Handle completion of a dataset load (device dump or CSV import)."""
+        if source is None:
+            source = getattr(self, "_last_data_source", "device")
+        self._last_data_source = source
+
         flight_data = self.data_manager.get_flight_data()
         samples_count = len(flight_data)
-        
-        self.log_message(f"Processing {samples_count} extracted samples...")
-        
+
+        self.log_message(f"Processing {samples_count} samples from {source}...")
+
         # Reset progress display
         self.data_panel.update_export_progress(0, 0)
         self.control_panel.update_extract_progress(0, 0)
-        
-        if samples_count > 0:
-            # Update the extracted data table
-            self.data_panel.update_extracted_data_table(flight_data)
-            
-            # Update statistics
-            stats = self.data_manager.get_statistics()
-            self.control_panel.update_statistics(stats)
-            
-            # Auto-plot the data in the classic Desktop_App view
-            phases = self.data_manager.get_flight_phases()
-            self.data_panel.update_visualization(flight_data, phases)
 
-            # Legacy Lab Analysis window from python_app is intentionally disabled.
-            # The merged dashboard is now the only active UI.
-
-            # Show detailed success message
-            success_msg = (
-                f"Data extraction successful!\n\n"
-                f"Samples loaded: {samples_count}\n"
-                f"Data plotted automatically\n"
-                f"Duration: {stats.get('duration', 0):.1f}s\n"
-                f"Max altitude: {stats.get('max_altitude', 0):.1f}m\n"
-                f"Max acceleration: {stats.get('max_acceleration', 0):.1f}m/s²\n\n"
-                f"Data available in 'Extracted Data' tab and Lab Analysis window"
+        if samples_count <= 0:
+            self.log_message("❌ No data is available to display")
+            QMessageBox.warning(
+                self,
+                "No Data",
+                "No flight data is available. The device may be empty or the file was invalid.",
             )
-            
-            self.log_message(f"Extraction complete: {samples_count} samples loaded and plotted")
-            QMessageBox.information(self, "Extraction Complete", success_msg)
-            
-            # Switch to extracted data tab
-            self.data_panel.switch_to_extracted_tab()
-            
+            return
+
+        # Update the extracted data table
+        self.data_panel.update_extracted_data_table(flight_data)
+
+        # Update statistics and plots
+        stats = self.data_manager.get_statistics()
+        self.control_panel.update_statistics(stats)
+        phases = self.data_manager.get_flight_phases()
+        self.data_panel.update_visualization(flight_data, phases)
+
+        # Compute total duration in seconds from device_timestamp when available
+        duration_s = 0.0
+        if "device_timestamp" in flight_data.columns and len(flight_data["device_timestamp"]) > 1:
+            ts = flight_data["device_timestamp"].astype(float)
+            duration_s = float((ts.max() - ts.min()) / 1000.0)
+
+        if source == "csv":
+            title = "CSV Loaded"
+            body = (
+                "CSV file loaded successfully.\n\n"
+                f"Samples: {samples_count}\n"
+                f"Total duration: {duration_s:.1f} s"
+            )
         else:
-            self.log_message("❌ No data was extracted from flash memory")
-            QMessageBox.warning(self, "Extraction Failed", 
-                              "No data was extracted from flash memory.\n"
-                              "The device may be empty or there was a communication error.")
+            title = "Data Extracted"
+            body = (
+                "Data extracted successfully from the Altimeter.\n\n"
+                f"Samples: {samples_count}\n"
+                f"Total duration: {duration_s:.1f} s"
+            )
+
+        self.log_message(f"{title}: {samples_count} samples, {duration_s:.1f} s")
+        QMessageBox.information(self, title, body)
+        # Switch to extracted data tab
+        self.data_panel.switch_to_extracted_tab()
         
     def scan_devices(self):
-        """Scan for BLE devices"""
-        self.log_message("Scanning for BLE devices...")
+        """Scan for Altimeter devices on USB serial ports."""
+        self.log_message("Scanning for serial ports...")
         self.ble_manager.scan_devices()
         
     def connect_device(self, address):
-        """Connect to a BLE device"""
+        """Connect to the Altimeter on the selected serial port."""
         if not address:
-            self.show_message("Please select a device first")
+            self.show_message("Please select a serial port first")
             return
-            
+        
         self.log_message(f"Connecting to {address}...")
         self.ble_manager.connect_to_device(address)
         
     def disconnect_device(self):
-        """Disconnect from BLE device"""
+        """Disconnect from the Altimeter."""
         self.log_message("Disconnecting...")
-        # Ask device to stop logging & drop BLE link before host disconnects
-        if self.ble_manager.is_connected():
-            try:
-                self.ble_manager.send_command("B")  # 'B' = stop logging, and firmware now also stops BLE
-            except Exception:
-                pass
         self.ble_manager.disconnect_device()
 
     def on_sample_rate_changed(self, rate_hz: int) -> None:
@@ -758,26 +839,26 @@ class TelemetryDashboard(QMainWindow):
             return
         self.log_message(f"Setting device sample rate to {rate_hz} Hz...")
         try:
-            # New firmware command: R10 / R25 / R50
+            # Firmware command: R10 / R25 / R50
             self.ble_manager.send_command(f"R{rate_hz}")
         except Exception as e:
             self.log_message(f"❌ Failed to send sample rate command: {e}")
         
     def check_memory(self):
-        """Check memory status"""
+        """Request a flash memory status update from the device."""
         if not self.ble_manager.is_connected():
             self.show_message("Not connected to any device")
             return
-            
+        
         self.log_message("Checking memory status...")
         self.ble_manager.send_command(CMD_MEMORY_STATUS)
         
     def erase_memory(self):
-        """Erase flash memory"""
+        """Erase flash memory on the Altimeter."""
         if not (self.ble_manager.is_connected() or self.is_connected):
             self.show_message("Not connected to any device")
             return
-            
+        
         reply = QMessageBox.question(
             self, "Confirm Erase", 
             "⚠️ This will erase ALL stored data!\nThis action cannot be undone.\n\nAre you sure?",
@@ -806,56 +887,43 @@ class TelemetryDashboard(QMainWindow):
             self.log_message("🎯 Test data generation command sent")
             
     def extract_data(self):
-        """Extract data from Arduino's flash memory over BLE."""
+        """Extract data from the Altimeter's flash memory over USB serial."""
         if not (self.ble_manager.is_connected() or self.is_connected):
             self.show_message("Not connected to any device")
             return
         
         reply = QMessageBox.question(
-            self, "Extract Data", 
-            "This will extract all data stored in flash memory.\nThis may take a few moments.\n\nContinue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            self,
+            "Extract Data",
+            "This will extract all data stored in flash memory.\n"
+            "This may take a few moments.\n\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         
         if reply == QMessageBox.StandardButton.Yes:
             try:
                 # Clear previous data and UI safely
                 self.data_manager.clear_data()
-                if hasattr(self.data_panel, 'clear_visualization'):
+                if hasattr(self.data_panel, "clear_visualization"):
                     self.data_panel.clear_visualization()
-                else:
-                    try:
-                        self.data_panel.plot_widget.clear()
-                    except Exception:
-                        pass
                 self.data_panel.update_extracted_data_table(self.data_manager.get_flight_data())
                 
-                # Reset BLE dump state before starting a new export
+                # Reset dump state before starting a new export
                 self._ble_dump_active = False
                 self._ble_dump_lines = []
                 
                 # Begin export
                 self.is_exporting_data = True
                 self.exported_samples = 0
-                self.expected_samples = 0
-                self.control_panel.update_extract_progress(0, 0)
-                self.data_panel.update_export_progress(0, 0)
-                self.log_message("Requesting data extraction from device (chunked)...")
+                # expected_samples is set from the latest MEMORY: response;
+                # if it is zero we will fall back to counting lines.
+                self.control_panel.update_extract_progress(0, self.expected_samples)
+                self.data_panel.update_export_progress(0, self.expected_samples)
+                self.log_message("Starting data download from the Altimeter. This may take a few seconds...")
 
-                # Reset file-export state so a new extraction always performs
-                # a full dump from chunk 0 for consistency with device memory.
-                self._file_export_active = False
-                self._file_total_chunks = 0
-                self._file_next_chunk = 0
-                self._file_total_samples = 0
-                self._file_samples_per_chunk = 0
-                self._file_last_completed_chunk = -1
-
-                # Kick off file-style export: ask for FILEINFO, which will
-                # then drive FGET:<chunkIndex> requests.
-                self.log_message("[TX] FINFO")
-                self.ble_manager.send_command("FINFO")
-                self.log_message("This may take a few seconds...")
+                # Send the simple 'D' command to stream the CSV dump.
+                self.log_message(f"[TX] {CMD_EXTRACT_DATA}")
+                self.ble_manager.send_command(CMD_EXTRACT_DATA)
             except Exception as e:
                 self.log_message(f"❌ Error starting extraction: {e}")
             
@@ -871,12 +939,12 @@ class TelemetryDashboard(QMainWindow):
         self.log_message("Plotting extracted data...")
         
     def export_to_csv(self):
-        """Export data to CSV file"""
+        """Export currently loaded flight data to a CSV file."""
         flight_data = self.data_manager.get_flight_data()
         if flight_data.empty:
-            self.show_message("No data to export. Please extract data from flash first.")
+            self.show_message("No data to export. Please extract data or import a CSV first.")
             return
-            
+        
         from datetime import datetime
         default_name = f"flight_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         filename, _ = QFileDialog.getSaveFileName(
@@ -889,6 +957,85 @@ class TelemetryDashboard(QMainWindow):
             else:
                 self.show_message("Error exporting data")
                 
+    def import_csv(self):
+        """Import a CSV file for offline analysis (no hardware required)."""
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Altimeter CSV",
+            "",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not filename:
+            return
+
+        try:
+            df = pd.read_csv(filename)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Import Failed", f"Could not read CSV file:\n{exc}")
+            return
+
+        # Normalize column names for matching
+        cols = {c.lower(): c for c in df.columns}
+
+        # Time column: prefer device_timestamp, otherwise derive from time_s
+        if "device_timestamp" in cols:
+            device_ts_col = cols["device_timestamp"]
+        elif "time_s" in cols:
+            time_s_col = cols["time_s"]
+            df["device_timestamp"] = (df[time_s_col].astype(float) * 1000.0).round().astype(int)
+            device_ts_col = "device_timestamp"
+        else:
+            QMessageBox.warning(
+                self,
+                "Import Failed",
+                "CSV must contain a 'device_timestamp' or 'time_s' column.",
+            )
+            return
+
+        # Altitude column: altitude or alt_m
+        if "altitude" in cols:
+            alt_col = cols["altitude"]
+        elif "alt_m" in cols:
+            alt_m_col = cols["alt_m"]
+            df["altitude"] = df[alt_m_col].astype(float)
+            alt_col = "altitude"
+        else:
+            QMessageBox.warning(
+                self,
+                "Import Failed",
+                "CSV must contain an 'altitude' or 'alt_m' column.",
+            )
+            return
+
+        # Acceleration column: use existing or compute magnitude from ax/ay/az
+        if "acceleration" in cols:
+            accel_col = cols["acceleration"]
+        else:
+            ax_col = cols.get("ax_ms2")
+            ay_col = cols.get("ay_ms2")
+            az_col = cols.get("az_ms2")
+            if ax_col and ay_col and az_col:
+                df["acceleration"] = np.sqrt(
+                    df[ax_col].astype(float) ** 2
+                    + df[ay_col].astype(float) ** 2
+                    + df[az_col].astype(float) ** 2
+                )
+            else:
+                df["acceleration"] = 0.0
+
+        try:
+            self.data_manager.set_flight_data(df)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(
+                self,
+                "Import Failed",
+                f"Could not load CSV into data model:\n{exc}",
+            )
+            return
+
+        self._last_data_source = "csv"
+        self.process_data_export_complete(source="csv")
+
     def view_all_data(self):
         """View all extracted data"""
         flight_data = self.data_manager.get_flight_data()
@@ -909,6 +1056,18 @@ class TelemetryDashboard(QMainWindow):
         self.data_panel.clear_logs()
         self.log_message("Logs cleared")
         
+    def handle_refresh(self) -> None:
+        """Clear current data, plots and logs ready for a new extraction."""
+        self.data_manager.clear_data()
+        self.data_panel.clear_visualization()
+        self.data_panel.update_extracted_data_table(self.data_manager.get_flight_data())
+        self.data_panel.clear_logs()
+        self.data_panel.update_export_progress(0, 0)
+        self.control_panel.update_extract_progress(0, 0)
+        # Reset expected sample count until the next MEMORY: response
+        self.expected_samples = 0
+        self.log_message("Refresh requested: cleared data, plots, and logs. Ready for a new download.")
+        
     def save_logs(self):
         """Save logs to file"""
         filename, _ = QFileDialog.getSaveFileName(
@@ -928,12 +1087,9 @@ class TelemetryDashboard(QMainWindow):
         stats = self.data_manager.get_statistics()
         self.control_panel.update_statistics(stats)
         
-    def log_message(self, message):
-        """Add message to log with timestamp"""
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        self.data_panel.add_log_message(f"[{timestamp}] {message}")
-        
+    def log_message(self, message: str) -> None:
+        """Append a line to the communication log."""
+        self.data_panel.add_log_message(message)
         if self.auto_scroll:
             scrollbar = self.data_panel.communication_log.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())

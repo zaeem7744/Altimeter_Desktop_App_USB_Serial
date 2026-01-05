@@ -1,7 +1,7 @@
 # ui_components/control_panel.py - UPDATED
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QLabel, QComboBox, QGroupBox, QProgressBar, QStyle)
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import pyqtSignal, QTimer
 from PyQt6.QtGui import QFont
 
 class ControlPanel(QWidget):
@@ -14,6 +14,7 @@ class ControlPanel(QWidget):
     generate_test_data_requested = pyqtSignal()
     extract_data_requested = pyqtSignal()
     export_requested = pyqtSignal()
+    import_csv_requested = pyqtSignal()
     view_data_requested = pyqtSignal()
     sample_rate_apply_requested = pyqtSignal(int)
     
@@ -76,7 +77,7 @@ class ControlPanel(QWidget):
         
         self.btn_scan = QPushButton("Scan")
         self.btn_scan.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
-        self.btn_scan.clicked.connect(self.scan_requested.emit)
+        self.btn_scan.clicked.connect(self._on_scan_clicked)
         btn_row.addWidget(self.btn_scan)
         
         self.btn_connect = QPushButton("Connect")
@@ -86,7 +87,7 @@ class ControlPanel(QWidget):
         
         self.btn_disconnect = QPushButton("Disconnect")
         self.btn_disconnect.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCancelButton))
-        self.btn_disconnect.clicked.connect(self.disconnect_requested.emit)
+        self.btn_disconnect.clicked.connect(self._on_disconnect_clicked)
         btn_row.addWidget(self.btn_disconnect)
         
         btn_row.addStretch()
@@ -114,14 +115,14 @@ class ControlPanel(QWidget):
         layout.addLayout(info_layout)
         
         btn_layout = QHBoxLayout()
-        btn_check_memory = QPushButton("Check Memory")
-        btn_check_memory.clicked.connect(self.memory_check_requested.emit)
-        btn_layout.addWidget(btn_check_memory)
+        self.btn_check_memory = QPushButton("Check Memory")
+        self.btn_check_memory.clicked.connect(self._on_check_memory_clicked)
+        btn_layout.addWidget(self.btn_check_memory)
         
-        btn_erase_memory = QPushButton("Erase Memory")
-        btn_erase_memory.clicked.connect(self.memory_erase_requested.emit)
-        btn_erase_memory.setStyleSheet("background-color: #ff4444; color: white;")
-        btn_layout.addWidget(btn_erase_memory)
+        self.btn_erase_memory = QPushButton("Erase Memory")
+        self.btn_erase_memory.setStyleSheet("background-color: #ff4444; color: white;")
+        self.btn_erase_memory.clicked.connect(self._on_erase_memory_clicked)
+        btn_layout.addWidget(self.btn_erase_memory)
         
         layout.addLayout(btn_layout)
         
@@ -132,27 +133,31 @@ class ControlPanel(QWidget):
         layout = QVBoxLayout(group)
         layout.setSpacing(8)
         
-        # Three primary actions in a single horizontal row
+        # Primary actions in a single horizontal row
         btn_row = QHBoxLayout()
 
-        btn_extract_data = QPushButton("Extract Data from Flash")
-        btn_extract_data.clicked.connect(self.extract_data_requested.emit)
-        btn_extract_data.setStyleSheet(
+        self.btn_extract_data = QPushButton("Extract Data from Flash")
+        self.btn_extract_data.setStyleSheet(
             "background-color: #2563eb;"
             "color: white;"
             "font-weight: bold;"
             "padding: 6px 10px;"
             "border-radius: 6px;"
         )
-        btn_row.addWidget(btn_extract_data)
+        self.btn_extract_data.clicked.connect(self._on_extract_clicked)
+        btn_row.addWidget(self.btn_extract_data)
 
-        btn_export_csv = QPushButton("Export to CSV")
-        btn_export_csv.clicked.connect(self.export_requested.emit)
-        btn_row.addWidget(btn_export_csv)
+        self.btn_export_csv = QPushButton("Export to CSV")
+        self.btn_export_csv.clicked.connect(self._on_export_clicked)
+        btn_row.addWidget(self.btn_export_csv)
+
+        self.btn_import_csv = QPushButton("Import CSV")
+        self.btn_import_csv.clicked.connect(self._on_import_clicked)
+        btn_row.addWidget(self.btn_import_csv)
         
-        btn_view_data = QPushButton("View All Data")
-        btn_view_data.clicked.connect(self.view_data_requested.emit)
-        btn_row.addWidget(btn_view_data)
+        self.btn_view_data = QPushButton("View All Data")
+        self.btn_view_data.clicked.connect(self._on_view_clicked)
+        btn_row.addWidget(self.btn_view_data)
 
         layout.addLayout(btn_row)
 
@@ -217,13 +222,30 @@ class ControlPanel(QWidget):
         layout.addWidget(demo)
 
         return group
-        
-        
+    
+    def _flash_button(self, button, highlight_css: str = "background-color: #1d4ed8; color: white;") -> None:
+        """Temporarily tint a button to provide click feedback."""
+        if not button:
+            return
+        original = button.styleSheet()
+        combined = f"{original}; {highlight_css}" if original else highlight_css
+        button.setStyleSheet(combined)
+        QTimer.singleShot(150, lambda: button.setStyleSheet(original))
+
+    def _on_scan_clicked(self):
+        self._flash_button(self.btn_scan)
+        self.scan_requested.emit()
+
     def _on_connect_clicked(self):
         if self.device_combo.currentData():
             address = self.device_combo.currentData()
+            self._flash_button(self.btn_connect)
             self.connect_requested.emit(address)
-            
+
+    def _on_disconnect_clicked(self):
+        self._flash_button(self.btn_disconnect, "background-color: #6b7280; color: white;")
+        self.disconnect_requested.emit()
+
     def update_connection_status(self, status, message):
         if status == "connected":
             self.connection_status.setText("Connected")
@@ -284,6 +306,7 @@ class ControlPanel(QWidget):
 
     def _on_sample_rate_apply_clicked(self):
         rate = self._get_selected_sample_rate()
+        self._flash_button(self.sample_rate_apply_btn)
         self.sample_rate_apply_requested.emit(rate)
 
     def update_sample_rate_display(self, rate_hz):
@@ -314,3 +337,27 @@ class ControlPanel(QWidget):
         # Insert just before the final stretch item so logs appear near the bottom
         index = max(0, self.main_layout.count() - 1)
         self.main_layout.insertWidget(index, logs_group)
+
+    def _on_check_memory_clicked(self):
+        self._flash_button(self.btn_check_memory)
+        self.memory_check_requested.emit()
+
+    def _on_erase_memory_clicked(self):
+        self._flash_button(self.btn_erase_memory, "background-color: #b91c1c; color: white;")
+        self.memory_erase_requested.emit()
+
+    def _on_extract_clicked(self):
+        self._flash_button(self.btn_extract_data, "background-color: #1d4ed8; color: white;")
+        self.extract_data_requested.emit()
+
+    def _on_export_clicked(self):
+        self._flash_button(self.btn_export_csv)
+        self.export_requested.emit()
+
+    def _on_import_clicked(self):
+        self._flash_button(self.btn_import_csv)
+        self.import_csv_requested.emit()
+
+    def _on_view_clicked(self):
+        self._flash_button(self.btn_view_data)
+        self.view_data_requested.emit()

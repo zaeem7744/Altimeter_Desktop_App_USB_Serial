@@ -1,35 +1,27 @@
-# config.py - UPDATED
-# BLE Configuration (matches Altimeter_Bluetooth_Firmware)
-# Firmware uses: service 19B10000-..., RX (write) 19B10001-..., TX (notify) 19B10002-...
+# config.py - USB serial configuration for Altimeter Flight Data Viewer
+
+# Human-friendly name advertised by the device (used for filtering ports)
 DEVICE_NAME = "Altimeter"
-SERVICE_UUID = "19B10000-E8F2-537E-4F6C-D104768A1214"
-# TX / notify characteristic used for streaming CSV lines back to the host
-DATA_UUID = "19B10002-E8F2-537E-4F6C-D104768A1214"
-# RX / write characteristic used for sending single-character commands (e.g. 'D')
-COMMAND_UUID = "19B10001-E8F2-537E-4F6C-D104768A1214"
 
-# Connection settings
-SCAN_TIMEOUT = 5
-CONNECTION_TIMEOUT = 5
-RECONNECT_DELAY = 2
-
-# Data processing
-MAX_DATA_POINTS = 1000
-SAMPLING_RATE = 10  # Hz
+# Serial port settings (must match firmware)
+BAUD_RATE = 115200
+SCAN_TIMEOUT = 5          # seconds to scan for serial ports
+RECONNECT_DELAY = 2       # seconds between reconnect attempts
 
 # Flash storage configuration (matches Arduino)
-TOTAL_SAMPLES = 24576  # 96 sectors * 256 samples
+TOTAL_SAMPLES = 24576    # 96 sectors * 256 samples
 SAMPLE_RATE_HZ = 50
 
-# Commands for BLE bridge
-# Altimeter_Bluetooth_Firmware only handles 'D' over BLE (flash dump).
-# Other commands (A/B/S/C) are handled via serial or button, not BLE.
-CMD_STATUS = "S"          # currently not handled over BLE, kept for compatibility
-CMD_MEMORY_STATUS = "S"   # ditto; memory info is derived from dump size
-CMD_EXTRACT_DATA = "D"    # trigger flash dump over BLE
-CMD_CLEAR_MEMORY = "C"    # clear via serial/button; sending over BLE is a no-op
+# Commands sent over serial
+CMD_STATUS = "S"            # request status / config summary
+CMD_MEMORY_STATUS = "S"     # query flash memory usage
+CMD_EXTRACT_DATA = "D"      # stream full flash dump as CSV
+CMD_CLEAR_MEMORY = "C"      # erase flash memory
+CMD_START_LOGGING = "A"     # (optional) start logging for next flight
+CMD_STOP_LOGGING = "B"      # (optional) stop logging
+CMD_SET_SAMPLE_RATE_PREFIX = "R"  # e.g. R10 / R25 / R50
 
-# Flight phases colors
+# Flight phases colors (used in visualization)
 PHASE_COLORS = {
     "Lift-off": "#00FF00",      # Green
     "Ascent": "#00FF00",        # Green  

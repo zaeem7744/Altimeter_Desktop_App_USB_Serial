@@ -17,12 +17,12 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('rocket_telemetry.log'),
+        logging.FileHandler('altimeter_flight_data.log'),
         logging.StreamHandler(sys.stdout)
     ]
 )
 
-class RocketTelemetryApp:
+class AltimeterFlightDataApp:
     def __init__(self):
         self.app = None
         self.dashboard = None
@@ -30,11 +30,11 @@ class RocketTelemetryApp:
         
     def setup_application(self):
         """Setup the Qt application and event loop"""
-        print("🚀 Starting Rocket Telemetry System - Professional Dashboard...")
+        print("🚀 Starting Altimeter Flight Data Viewer - USB Serial Dashboard...")
         
         # Create Qt Application
         self.app = QApplication(sys.argv)
-        self.app.setApplicationName("Rocket Telemetry System")
+        self.app.setApplicationName("Altimeter Flight Data Viewer")
         self.app.setApplicationVersion("1.0.0")
         
         try:
@@ -58,19 +58,19 @@ class RocketTelemetryApp:
         print("=" * 60)
         print("🎯 System Ready for Operation")
         print("📊 Features Available:")
-        print("   • BLE Device Connection & Management")
-        print("   • Real-time Data Visualization")
-        print("   • Memory Status Monitoring")
-        print("   • Flight Phase Detection")
-        print("   • Data Export (CSV, Logs)")
-        print("   • Communication Logging")
+        print("   • USB serial device connection & management")
+        print("   • Real-time flight data visualization")
+        print("   • Flash memory status & management")
+        print("   • Data extraction to CSV from the Altimeter")
+        print("   • Offline CSV import and analysis")
+        print("   • Live communication logging")
         print("=" * 60)
         
         return self.app.exec()
     
     def cleanup(self):
         """Cleanup resources before exit"""
-        print("\n🔌 Shutting down Rocket Telemetry System...")
+        print("\n🔌 Shutting down Altimeter Flight Data Viewer...")
         if self.dashboard and hasattr(self.dashboard, 'ble_client'):
             try:
                 # Ensure proper disconnection
@@ -84,7 +84,7 @@ class RocketTelemetryApp:
             except Exception as e:
                 print(f"⚠️  Cleanup warning: {e}")
         
-        print("👋 Goodbye! Rocket Telemetry System shut down successfully.")
+        print("👋 Goodbye! Altimeter Flight Data Viewer shut down successfully.")
     
     def run(self):
         """Main application entry point"""
@@ -122,7 +122,6 @@ def check_dependencies():
 
     required_packages = {
         'PyQt6': 'PyQt6',
-        'bleak': 'bleak',
         'pandas': 'pandas', 
         'numpy': 'numpy',
         'pyqtgraph': 'pyqtgraph',
@@ -159,7 +158,7 @@ def main():
             try:
                 import subprocess
                 subprocess.check_call([sys.executable, "-m", "pip", "install", 
-                                      "PyQt6", "bleak", "pandas", "numpy", 
+                                      "PyQt6", "pandas", "numpy", 
                                       "pyqtgraph", "qasync", "pyserial"])
                 print("✅ Dependencies installed successfully!")
             except Exception as e:
@@ -169,7 +168,7 @@ def main():
             return 1
     
     # Create and run application
-    app = RocketTelemetryApp()
+    app = AltimeterFlightDataApp()
     return app.run()
 
 if __name__ == "__main__":
