@@ -1,1 +1,0 @@
-task: <Task pending name='Task-17' coro=<BLEManager._disconnect_async() done, defined at d:\Projects\Altimeter_Desktop_App\ui_components\ble_manager.py:140> wait_for=<Future pending cb=[Task.task_wakeup()]> cb=[_chain_future.<locals>._call_set_state() at C:\Users\HP i7\AppData\Local\Python\pythoncore-3.14-64\Lib\asyncio\futures.py:400]>
