@@ -8,8 +8,9 @@ BAUD_RATE = 115200
 SCAN_TIMEOUT = 5          # seconds to scan for serial ports
 RECONNECT_DELAY = 2       # seconds between reconnect attempts
 
-# Flash storage configuration (matches Arduino)
-TOTAL_SAMPLES = 24576    # 96 sectors * 256 samples
+# Flash storage configuration (matches Arduino firmware FlashStorage.h)
+# 96 sectors * 180 samples per sector = 17,280 samples total.
+TOTAL_SAMPLES = 17280
 SAMPLE_RATE_HZ = 50
 
 # Commands sent over serial

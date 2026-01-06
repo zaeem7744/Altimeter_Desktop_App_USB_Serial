@@ -1,4 +1,4 @@
-Altimeter Desktop App - BLE Export Changes
+Altimeter Desktop App - Notes
 =========================================
 
 2026-01-04

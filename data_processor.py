@@ -349,7 +349,8 @@ class DataProcessor:
                 
                 total_samples = self._extract_memory_value(memory_info, ['totalsamples', 'totalsample'], 0)
                 usage_percent_str = self._extract_memory_value(memory_info, ['usage', 'use'], '0%')
-                max_capacity = self._extract_memory_value(memory_info, ['maxcapacity', 'maxcap', 'capacity'], 24576)
+                from config import TOTAL_SAMPLES as FW_TOTAL_SAMPLES  # avoid circulars at import time
+                max_capacity = self._extract_memory_value(memory_info, ['maxcapacity', 'maxcap', 'capacity'], FW_TOTAL_SAMPLES)
                 full_status = self._extract_memory_value(memory_info, ['full', 'isfull'], 'false')
                 
                 usage_percent = int(usage_percent_str.replace('%', '')) if '%' in usage_percent_str else int(usage_percent_str)
@@ -376,13 +377,14 @@ class DataProcessor:
         except Exception as e:
             print(f"❌ Error parsing memory status '{data}': {e}")
             
+        from config import TOTAL_SAMPLES as FW_TOTAL_SAMPLES  # lazy import
         return {
             "timestamp": datetime.now(),
             "raw_data": data,
             "data_type": "memory",
             "total_samples": 0,
             "usage_percent": 0,
-            "max_capacity": 24576,
+            "max_capacity": FW_TOTAL_SAMPLES,
             "is_full": False
         }
 
@@ -403,10 +405,11 @@ class DataProcessor:
         """Process memory cleared message"""
         print("🗑️ Memory cleared message received")
         
+        from config import TOTAL_SAMPLES as FW_TOTAL_SAMPLES  # lazy import
         self.last_memory_status = {
             "total_samples": 0,
             "usage_percent": 0,
-            "max_capacity": 24576,
+            "max_capacity": FW_TOTAL_SAMPLES,
             "is_full": False,
             "data_points": 0
         }
@@ -596,41 +599,79 @@ class DataProcessor:
         return self.get_flash_data_stats()
 
     def export_to_csv(self, filename):
-        """Export flight data to CSV"""
-        if not self.flight_data.empty:
-            export_data = self.flight_data.copy()
-            
-            # Drop raw BLE text column if present
-            if 'raw_data' in export_data.columns:
-                export_data = export_data.drop('raw_data', axis=1)
+        """Export flight data to CSV.
 
-            # Filter out obviously invalid/empty samples (device_timestamp == 0)
-            if 'device_timestamp' in export_data.columns:
-                export_data = export_data[export_data['device_timestamp'] != 0]
+        The exported file follows these rules:
+        - A **single** time reference column (``device_timestamp``) is
+          used. Any auxiliary time columns such as ``timestamp`` or
+          ``time_s`` are omitted from the CSV.
+        - Raw sensor values (altitude, acceleration, axis data, gyro,
+          temperature, etc.) are exported next.
+        - If present, processed/derived series are appended afterwards.
+        """
+        if self.flight_data.empty:
+            print("❌ No data to export")
+            return False
 
-            if export_data.empty:
-                print("❌ No valid samples to export (all were empty)")
-                return False
-                
-            preferred_order = [
-                'timestamp', 'device_timestamp',
-                'altitude', 'acceleration',
-                'ax_ms2', 'ay_ms2', 'az_ms2',
-                'gx_rad_s', 'gy_rad_s', 'gz_rad_s',
-                'temp_C'
-            ]
-            existing_columns = [col for col in preferred_order if col in export_data.columns]
-            other_columns = [col for col in export_data.columns if col not in preferred_order]
-            final_order = existing_columns + other_columns
-            
-            export_data = export_data[final_order]
-                
-            export_data.to_csv(filename, index=False)
-            print(f"💾 Exported {len(export_data)} samples to {filename}")
-            return True
-            
-        print("❌ No data to export")
-        return False
+        export_data = self.flight_data.copy()
+
+        # Drop raw BLE text column if present
+        if "raw_data" in export_data.columns:
+            export_data = export_data.drop("raw_data", axis=1)
+
+        # Filter out obviously invalid/empty samples (device_timestamp == 0)
+        if "device_timestamp" in export_data.columns:
+            export_data = export_data[export_data["device_timestamp"] != 0]
+
+        if export_data.empty:
+            print("❌ No valid samples to export (all were empty)")
+            return False
+
+        # Remove duplicate / auxiliary time columns – keep only device_timestamp
+        time_aliases = ["timestamp", "time_s", "t_ms", "timestamp_ms"]
+        for col in time_aliases:
+            if col in export_data.columns:
+                export_data = export_data.drop(col, axis=1)
+
+        # Drop alt_m if altitude already exists (avoid duplicate altitude columns)
+        if "altitude" in export_data.columns and "alt_m" in export_data.columns:
+            export_data = export_data.drop("alt_m", axis=1)
+
+        # Define preferred column ordering
+        raw_preferred = [
+            "device_timestamp",  # single time reference
+            "altitude",
+            "acceleration",
+            "ax_ms2",
+            "ay_ms2",
+            "az_ms2",
+            "gx_rad_s",
+            "gy_rad_s",
+            "gz_rad_s",
+            "temp_C",
+        ]
+
+        processed_preferred = [
+            "altitude_relative",
+            "altitude_smooth",
+            "velocity_raw",
+            "velocity_smooth",
+            "acceleration_mag",
+            "acceleration_net",
+            "acceleration_smooth",
+        ]
+
+        preferred_order = raw_preferred + processed_preferred
+
+        existing_columns = [col for col in preferred_order if col in export_data.columns]
+        other_columns = [col for col in export_data.columns if col not in preferred_order]
+        final_order = existing_columns + other_columns
+
+        export_data = export_data[final_order]
+
+        export_data.to_csv(filename, index=False)
+        print(f"💾 Exported {len(export_data)} samples to {filename}")
+        return True
 
     def clear_data(self):
         """Clear all data"""

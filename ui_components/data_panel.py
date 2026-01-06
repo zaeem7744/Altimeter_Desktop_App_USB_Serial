@@ -226,29 +226,42 @@ class DataPanel(QWidget):
         return tab
         
     def create_extracted_tab(self):
-        """Create tab for extracted flash data - UPDATED WITH PROGRESS"""
+        """Create tab for extracted flash data.
+
+        The table shows one device timestamp column (seconds), the raw
+        sensor values received from the hardware, and three filtered
+        columns (altitude, acceleration, velocity) computed by the
+        desktop application. The CSV export uses the exact same
+        structure and column order.
+        """
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        
+
         # Progress indicator
         self.export_progress_label = QLabel("No data extraction in progress")
         self.export_progress_label.setStyleSheet("color: #666; padding: 5px;")
         layout.addWidget(self.export_progress_label)
-        
-        # Data info
-        self.extracted_info_label = QLabel("No data extracted yet. Use 'Extract Data from Flash' to load data.")
-        self.extracted_info_label.setStyleSheet("color: #666; font-style: italic; padding: 10px;")
+
+        # Short description of what the table contains
+        self.extracted_info_label = QLabel(
+            "This table shows the raw values from the hardware together with "
+            "filtered altitude, velocity, and acceleration computed by the application."
+        )
+        self.extracted_info_label.setWordWrap(True)
+        self.extracted_info_label.setStyleSheet(
+            "color: #374151; padding: 6px 0 10px 0;"
+        )
         layout.addWidget(self.extracted_info_label)
-        
-        # Data table for extracted data
+
+        # Data table for extracted data. Columns are configured
+        # dynamically in update_extracted_data_table() so that they
+        # always match the CSV export format.
         self.extracted_data_table = QTableWidget()
-        self.extracted_data_table.setColumnCount(4)
-        self.extracted_data_table.setHorizontalHeaderLabels([
-            "Time (s)", "Device Time (ms)", "Altitude (m)", "Acceleration (m/s²)"
-        ])
-        self.extracted_data_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.extracted_data_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
         layout.addWidget(self.extracted_data_table)
-        
+
         return tab
         
     def create_log_group(self):
@@ -507,45 +520,161 @@ class DataPanel(QWidget):
             self.export_progress_label.setStyleSheet("color: #666; padding: 5px;")
                 
     def update_extracted_data_table(self, flight_data):
-        """Update the extracted data table with flash data"""
+        """Update the extracted data table with flash data.
+
+        The table and the CSV export share the same structure:
+
+        - ``device_timestamp``  (seconds, formatted to 2 decimal places)
+        - ``altitude``          (raw, from the hardware)
+        - ``acceleration``      (raw, from the hardware)
+        - ``ax_ms2``, ``ay_ms2``, ``az_ms2`` (raw axes, when available)
+        - ``altitude_filtered``     (filtered altitude used in plots)
+        - ``acceleration_filtered`` (filtered/net acceleration used in plots)
+        - ``velocity_filtered``     (filtered velocity used in plots)
+        """
         if flight_data.empty:
+            self.extracted_data_table.clear()
             self.extracted_data_table.setRowCount(0)
-            self.extracted_info_label.setText("No data extracted yet. Use 'Extract Data from Flash' to load data.")
+            self.extracted_data_table.setColumnCount(0)
+            self.extracted_info_label.setText(
+                "No data extracted yet. Use 'Extract Data from Flash' to load data."
+            )
             return
-            
-        self.extracted_data_table.setRowCount(len(flight_data))
-        self.extracted_info_label.setText(f"Displaying {len(flight_data)} samples extracted from flash memory")
-        
-        # Pre-compute a relative time axis in seconds, starting at 0.00
-        time_s = None
-        if "device_timestamp" in flight_data.columns:
-            dt = flight_data["device_timestamp"].astype(float)
-            if not dt.empty:
-                base = dt.iloc[0]
-                time_s = (dt - base) / 1000.0
 
-        for row, (idx, data_row) in enumerate(flight_data.iterrows()):
-            # Time in seconds since start (0.00, 0.02, ...)
-            if time_s is not None:
-                t_val = float(time_s.loc[idx])
-                self.extracted_data_table.setItem(row, 0,
-                    QTableWidgetItem(f"{t_val:.2f}"))
+        import numpy as _np
 
-            # Device timestamp (raw milliseconds)
-            if "device_timestamp" in data_row:
-                self.extracted_data_table.setItem(row, 1,
-                    QTableWidgetItem(str(data_row["device_timestamp"])))
-                    
-            # Altitude
-            if "altitude" in data_row:
-                self.extracted_data_table.setItem(row, 2, 
-                    QTableWidgetItem(f"{data_row['altitude']:.2f}"))
-                    
-            # Acceleration
-            if "acceleration" in data_row:
-                self.extracted_data_table.setItem(row, 3, 
-                    QTableWidgetItem(f"{data_row['acceleration']:.2f}"))
-                
+        df = flight_data.copy()
+
+        # Ensure we have an integer millisecond device timestamp for
+        # processing. The visible time column will always be expressed
+        # in seconds.
+        if "device_timestamp" not in df.columns:
+            # Fall back to any known time-like column
+            for alt_time_col in ("time_s", "t_ms", "timestamp_ms"):
+                if alt_time_col in df.columns:
+                    series = _np.asarray(df[alt_time_col], dtype=float)
+                    if alt_time_col == "time_s":
+                        df["device_timestamp"] = _np.round(series * 1000.0).astype(int)
+                    else:
+                        df["device_timestamp"] = series.astype(int)
+                    break
+
+        # Build processed series using the same helper that powers the
+        # graphs so the filtered values match what the user sees.
+        processed, _stats = self._build_processed_from_dataframe(df)
+        has_processed = processed is not None and bool(processed.time)
+
+        # Canonical column order for table and CSV
+        base_columns = [
+            "device_timestamp",  # shown as seconds with 2 decimals
+            "altitude",
+            "acceleration",
+            "ax_ms2",
+            "ay_ms2",
+            "az_ms2",
+            "altitude_filtered",
+            "acceleration_filtered",
+            "velocity_filtered",
+        ]
+
+        # Only keep columns that are actually available / computable
+        visible_columns: list[str] = []
+        for name in base_columns:
+            if name in ("altitude_filtered", "acceleration_filtered", "velocity_filtered"):
+                if has_processed:
+                    visible_columns.append(name)
+            else:
+                if name == "device_timestamp" and "device_timestamp" in df.columns:
+                    visible_columns.append(name)
+                elif name in df.columns:
+                    visible_columns.append(name)
+
+        n_rows = len(df)
+        self.extracted_data_table.clear()
+        self.extracted_data_table.setRowCount(n_rows)
+        self.extracted_data_table.setColumnCount(len(visible_columns))
+
+        # Map internal column names to short, professional headers.
+        header_labels: list[str] = []
+        for name in visible_columns:
+            if name == "device_timestamp":
+                label = "Time (s)"
+            elif name == "altitude":
+                label = "Alt (m)"
+            elif name == "acceleration":
+                label = "Accel (m/s²)"
+            elif name == "ax_ms2":
+                label = "Ax (m/s²)"
+            elif name == "ay_ms2":
+                label = "Ay (m/s²)"
+            elif name == "az_ms2":
+                label = "Az (m/s²)"
+            elif name == "altitude_filtered":
+                label = "Alt filt (m)"
+            elif name == "acceleration_filtered":
+                label = "Accel filt (m/s²)"
+            elif name == "velocity_filtered":
+                label = "Vel filt (m/s)"
+            else:
+                label = name
+            header_labels.append(label)
+
+        self.extracted_data_table.setHorizontalHeaderLabels(header_labels)
+        # Make header text bold for clarity
+        header_font = self.extracted_data_table.horizontalHeader().font()
+        header_font.setBold(True)
+        self.extracted_data_table.horizontalHeader().setFont(header_font)
+
+        self.extracted_info_label.setText(
+            f"Displaying {n_rows} samples extracted from flash memory"
+        )
+
+        # Prepare processed arrays aligned with the DataFrame index
+        alt_f = vel_f = acc_f = None
+        if has_processed:
+            alt_f = processed.altitude_smooth
+            vel_f = processed.velocity_smooth
+            acc_f = processed.acceleration_smooth
+
+        # Populate cells row by row
+        for row_idx, (_, data_row) in enumerate(df.iterrows()):
+            # Visible time in seconds (2 decimals), always from
+            # device_timestamp milliseconds when available.
+            ts_ms = data_row.get("device_timestamp", row_idx)
+            try:
+                t_sec = float(ts_ms) / 1000.0
+            except Exception:
+                t_sec = float(row_idx)
+
+            for col_idx, col_name in enumerate(visible_columns):
+                if col_name == "device_timestamp":
+                    text = f"{t_sec:.2f}"
+                elif col_name == "altitude_filtered" and has_processed and alt_f is not None:
+                    val = alt_f[row_idx] if row_idx < len(alt_f) else _np.nan
+                    text = "" if _np.isnan(val) else f"{float(val):.3f}"
+                elif col_name == "velocity_filtered" and has_processed and vel_f is not None:
+                    val = vel_f[row_idx] if row_idx < len(vel_f) else _np.nan
+                    text = "" if _np.isnan(val) else f"{float(val):.3f}"
+                elif col_name == "acceleration_filtered" and has_processed and acc_f is not None:
+                    val = acc_f[row_idx] if row_idx < len(acc_f) else _np.nan
+                    text = "" if _np.isnan(val) else f"{float(val):.3f}"
+                else:
+                    value = data_row.get(col_name, "")
+                    if value is None:
+                        text = ""
+                    else:
+                        if isinstance(value, (int, float)):
+                            if isinstance(value, int) or float(value).is_integer():
+                                text = str(int(value))
+                            else:
+                                text = f"{float(value):.3f}"
+                        else:
+                            text = str(value)
+
+                self.extracted_data_table.setItem(
+                    row_idx, col_idx, QTableWidgetItem(text)
+                )
+
         # Auto-switch to extracted data tab
         self.switch_to_extracted_tab()
                 

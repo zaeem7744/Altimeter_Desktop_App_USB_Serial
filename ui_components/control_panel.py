@@ -26,6 +26,10 @@ class ControlPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setSpacing(14)
         layout.setContentsMargins(10, 10, 10, 10)
+        # Ensure the control panel prefers to expand with the width of
+        # the scroll area so horizontal scrolling is never required.
+        from PyQt6.QtWidgets import QSizePolicy
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.main_layout = layout
         
         # Connection Status
@@ -109,7 +113,13 @@ class ControlPanel(QWidget):
         
         info_layout = QHBoxLayout()
         info_layout.addWidget(QLabel("Capacity:"))
-        self.capacity_label = QLabel(f"{24576} samples")
+        # Use the same TOTAL_SAMPLES constant as the firmware so the
+        # initial capacity label matches the real flash size.
+        try:
+            from config import TOTAL_SAMPLES as FW_TOTAL_SAMPLES  # type: ignore
+        except Exception:
+            FW_TOTAL_SAMPLES = 17280  # safe fallback
+        self.capacity_label = QLabel(f"{FW_TOTAL_SAMPLES} samples")
         info_layout.addWidget(self.capacity_label)
         info_layout.addStretch()
         layout.addLayout(info_layout)
@@ -132,34 +142,44 @@ class ControlPanel(QWidget):
         group = QGroupBox("Flash Data Management")
         layout = QVBoxLayout(group)
         layout.setSpacing(8)
-        
-        # Primary actions in a single horizontal row
-        btn_row = QHBoxLayout()
 
-        self.btn_extract_data = QPushButton("Extract Data from Flash")
+        from PyQt6.QtWidgets import QSizePolicy, QGridLayout
+
+        # Arrange actions in a responsive grid so that no horizontal
+        # scrolling or clipping occurs even when the window is narrow.
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+
+        self.btn_extract_data = QPushButton("Extract from Flash")
         self.btn_extract_data.setStyleSheet(
             "background-color: #2563eb;"
             "color: white;"
             "font-weight: bold;"
-            "padding: 6px 10px;"
+            "padding: 6px 8px;"
             "border-radius: 6px;"
         )
+        self.btn_extract_data.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.btn_extract_data.clicked.connect(self._on_extract_clicked)
-        btn_row.addWidget(self.btn_extract_data)
+        # Make the primary action span the full row
+        grid.addWidget(self.btn_extract_data, 0, 0, 1, 2)
 
-        self.btn_export_csv = QPushButton("Export to CSV")
+        self.btn_export_csv = QPushButton("Export CSV")
+        self.btn_export_csv.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.btn_export_csv.clicked.connect(self._on_export_clicked)
-        btn_row.addWidget(self.btn_export_csv)
+        grid.addWidget(self.btn_export_csv, 1, 0)
 
         self.btn_import_csv = QPushButton("Import CSV")
+        self.btn_import_csv.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.btn_import_csv.clicked.connect(self._on_import_clicked)
-        btn_row.addWidget(self.btn_import_csv)
-        
-        self.btn_view_data = QPushButton("View All Data")
-        self.btn_view_data.clicked.connect(self._on_view_clicked)
-        btn_row.addWidget(self.btn_view_data)
+        grid.addWidget(self.btn_import_csv, 1, 1)
 
-        layout.addLayout(btn_row)
+        self.btn_view_data = QPushButton("View Data")
+        self.btn_view_data.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.btn_view_data.clicked.connect(self._on_view_clicked)
+        grid.addWidget(self.btn_view_data, 2, 0, 1, 2)
+
+        layout.addLayout(grid)
 
         # Extraction progress bar (graphical) below the row of actions
         self.extract_progress = QProgressBar()

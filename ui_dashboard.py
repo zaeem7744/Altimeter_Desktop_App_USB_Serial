@@ -87,15 +87,25 @@ class TelemetryDashboard(QMainWindow):
         
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # Make the left control panel scrollable so sections have more room
+        # Make the left control panel scrollable so sections have more room.
+        # Horizontal scrolling is disabled so the toolbar never scrolls
+        # sideways; the control panel will resize to fit the available
+        # width and use vertical scrolling only.
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        left_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.control_panel.setMinimumWidth(0)
         left_scroll.setWidget(self.control_panel)
         splitter.addWidget(left_scroll)
 
         # Make the main visualization area scrollable so graphs have more room
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        right_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         right_scroll.setWidget(self.data_panel)
         splitter.addWidget(right_scroll)
         splitter.setSizes([420, 980])
@@ -710,6 +720,21 @@ class TelemetryDashboard(QMainWindow):
             if first_alt > 1000.0 and second_alt < 500.0:
                 df = df.iloc[1:].reset_index(drop=True)
 
+        # Some devices can wrap the circular flash buffer so that a tail
+        # of an old session appears before the new session that starts
+        # near time_s == 0. To keep plots and CSV clean, drop any leading
+        # rows that come *before* the smallest time_s value.
+        if "time_s" in df.columns and not df.empty:
+            try:
+                t_series = df["time_s"].astype(float)
+                idx0 = int(t_series.idxmin())
+                if idx0 > 0:
+                    df = df.iloc[idx0:].reset_index(drop=True)
+            except Exception:
+                # If anything goes wrong, keep the original data rather
+                # than risking dropping valid samples.
+                pass
+
         if df.empty:
             # No valid rows – treat as "no data" from device
             self.data_manager.clear_data()
@@ -730,7 +755,9 @@ class TelemetryDashboard(QMainWindow):
             self.log_message(f"❌ Failed to store flight data from BLE dump: {exc}")
             return
 
-        # Derive memory status from number of samples
+        # Derive memory status from number of samples using the same
+        # firmware TOTAL_SAMPLES constant as config.py so the desktop UI
+        # and device stay in sync.
         try:
             from config import TOTAL_SAMPLES  # type: ignore
 
@@ -939,23 +966,128 @@ class TelemetryDashboard(QMainWindow):
         self.log_message("Plotting extracted data...")
         
     def export_to_csv(self):
-        """Export currently loaded flight data to a CSV file."""
+        """Export currently loaded flight data to a CSV file.
+
+        The exported CSV has exactly the same structure as the Extracted
+        Data tab:
+
+        - device_timestamp (seconds, 2 decimals)
+        - altitude, acceleration, ax_ms2, ay_ms2, az_ms2 (raw values)
+        - altitude_filtered, acceleration_filtered, velocity_filtered
+          (processed values used for plotting)
+        """
         flight_data = self.data_manager.get_flight_data()
         if flight_data.empty:
             self.show_message("No data to export. Please extract data or import a CSV first.")
             return
-        
+
         from datetime import datetime
         default_name = f"flight_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         filename, _ = QFileDialog.getSaveFileName(
             self, "Export CSV", default_name, "CSV Files (*.csv)"
         )
-        if filename:
-            if self.data_manager.export_to_csv(filename):
-                self.log_message(f"Data exported to {filename}")
-                self.show_message(f"Data successfully exported to {filename}")
-            else:
-                self.show_message("Error exporting data")
+        if not filename:
+            return
+
+        # Canonical column order shared with DataPanel.update_extracted_data_table()
+        base_columns = [
+            "device_timestamp",  # seconds in the CSV
+            "altitude",
+            "acceleration",
+            "ax_ms2",
+            "ay_ms2",
+            "az_ms2",
+            "altitude_filtered",
+            "acceleration_filtered",
+            "velocity_filtered",
+        ]
+
+        df = flight_data.copy()
+
+        # Ensure we have a millisecond timestamp column; visible/exported
+        # time will be seconds.
+        if "device_timestamp" not in df.columns:
+            import numpy as _np
+
+            for alt_time_col in ("time_s", "t_ms", "timestamp_ms"):
+                if alt_time_col in df.columns:
+                    series = _np.asarray(df[alt_time_col], dtype=float)
+                    if alt_time_col == "time_s":
+                        df["device_timestamp"] = _np.round(series * 1000.0).astype(int)
+                    else:
+                        df["device_timestamp"] = series.astype(int)
+                    break
+
+        # Build processed series so that altitude_filtered / etc match the
+        # graphs. This reuses the same helper as DataPanel.
+        processed, _stats = self.data_panel._build_processed_from_dataframe(df)
+        has_processed = processed is not None and bool(getattr(processed, "time", []))
+
+        import numpy as _np
+        import pandas as _pd
+
+        n_rows = len(df)
+        if n_rows == 0:
+            self.show_message("No data to export.")
+            return
+
+        # Time in seconds is derived from device_timestamp milliseconds.
+        ts_ms = _np.asarray(df.get("device_timestamp", _np.arange(n_rows)), dtype=float)
+        time_s = ts_ms / 1000.0
+
+        data_dict: dict[str, list] = {"device_timestamp": [round(float(t), 2) for t in time_s]}
+
+        # Helper to safely pull a raw column if present
+        def _col_or_nan(name: str) -> list:
+            if name in df.columns:
+                return [df[name].iloc[i] for i in range(n_rows)]
+            return [float("nan")] * n_rows
+
+        for raw_name in ["altitude", "acceleration", "ax_ms2", "ay_ms2", "az_ms2"]:
+            if raw_name in df.columns:
+                data_dict[raw_name] = _col_or_nan(raw_name)
+
+        if has_processed:
+            alt_f = processed.altitude_smooth
+            vel_f = processed.velocity_smooth
+            acc_f = processed.acceleration_smooth
+
+            data_dict["altitude_filtered"] = [
+                float(alt_f[i]) if i < len(alt_f) else float("nan") for i in range(n_rows)
+            ]
+            data_dict["acceleration_filtered"] = [
+                float(acc_f[i]) if i < len(acc_f) else float("nan") for i in range(n_rows)
+            ]
+            data_dict["velocity_filtered"] = [
+                float(vel_f[i]) if i < len(vel_f) else float("nan") for i in range(n_rows)
+            ]
+
+        export_df = _pd.DataFrame(data_dict)
+
+        # Enforce canonical column order and drop anything unexpected.
+        final_columns = [c for c in base_columns if c in export_df.columns]
+        export_df = export_df[final_columns]
+
+        try:
+            # Format device_timestamp with exactly two decimals by casting
+            # to strings; other columns are left numeric.
+            export_df["device_timestamp"] = export_df["device_timestamp"].map(
+                lambda v: f"{float(v):.2f}"
+            )
+            export_df.to_csv(filename, index=False)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Export Failed", f"Could not write CSV file:\n{exc}")
+            return
+
+        self.log_message(f"Data exported to {filename}")
+        # Inform the user that the CSV contains both raw and filtered data.
+        QMessageBox.information(
+            self,
+            "CSV Exported",
+            "The CSV file was exported successfully and contains both raw "
+            "sensor data (directly from the hardware) and filtered altitude, "
+            "velocity, and acceleration columns generated by the desktop application.",
+        )
                 
     def import_csv(self):
         """Import a CSV file for offline analysis (no hardware required)."""
@@ -977,13 +1109,18 @@ class TelemetryDashboard(QMainWindow):
         # Normalize column names for matching
         cols = {c.lower(): c for c in df.columns}
 
-        # Time column: prefer device_timestamp, otherwise derive from time_s
+        # Time column: the new format uses a single device_timestamp
+        # column in seconds with two decimals. Internally we still work
+        # in milliseconds.
         if "device_timestamp" in cols:
             device_ts_col = cols["device_timestamp"]
+            time_s = df[device_ts_col].astype(float)
+            df["device_timestamp"] = (time_s * 1000.0).round().astype(int)
         elif "time_s" in cols:
             time_s_col = cols["time_s"]
-            df["device_timestamp"] = (df[time_s_col].astype(float) * 1000.0).round().astype(int)
-            device_ts_col = "device_timestamp"
+            df["device_timestamp"] = (
+                df[time_s_col].astype(float) * 1000.0
+            ).round().astype(int)
         else:
             QMessageBox.warning(
                 self,
@@ -1022,6 +1159,31 @@ class TelemetryDashboard(QMainWindow):
                 )
             else:
                 df["acceleration"] = 0.0
+
+        # Apply the same "start-of-flight" trimming used for device dumps so
+        # that imported CSVs also drop any leading wrapped/stale samples. We
+        # look for the smallest time value and discard rows before it.
+        try:
+            if "time_s" in cols:
+                t_series = df[cols["time_s"]].astype(float)
+            else:
+                # device_timestamp is in milliseconds; convert to seconds for
+                # the same comparison behaviour.
+                t_series = (df["device_timestamp"].astype(float) / 1000.0)
+
+            idx0 = int(t_series.idxmin())
+            if idx0 > 0:
+                df = df.iloc[idx0:].reset_index(drop=True)
+        except Exception:
+            # If anything fails here, keep original data rather than risk
+            # dropping valid rows.
+            pass
+
+        # The new combined format already includes the filtered
+        # columns. Keep them as-is if present so plots and the table can
+        # show both raw and filtered data.
+        # No special tagging is required; we simply propagate the
+        # columns into the internal flight_data DataFrame.
 
         try:
             self.data_manager.set_flight_data(df)
