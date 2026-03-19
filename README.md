@@ -1,4 +1,4 @@
-# ðŸ”ï¸ Altimeter â€” Desktop App (USB Serial)
+# 🏔️ Altimeter — Desktop App (USB Serial)
 
 ![USB](https://img.shields.io/badge/USB_Serial-333333?style=flat-square)
 
@@ -8,18 +8,18 @@ Desktop application for receiving and visualizing real-time altitude data from t
 
 ---
 
-## ðŸ”§ Features
+## 🔧 Features
 
-- **USB Serial Communication** â€” Connects to Altimeter device via USB/COM port
-- **Real-Time Data** â€” Live altitude, pressure, and sensor readings
-- **Data Visualization** â€” Graphical display of altitude measurements
-- **Cross-Platform** â€” Desktop application for Windows
+- **USB Serial Communication** — Connects to Altimeter device via USB/COM port
+- **Real-Time Data** — Live altitude, pressure, and sensor readings
+- **Data Visualization** — Graphical display of altitude measurements
+- **Cross-Platform** — Desktop application for Windows
 
 ---
 
-## ðŸ‘¤ Author
+## 👤 Author
 
 **Muhammad Zaeem Sarfraz**
-- ðŸ”— [LinkedIn](https://www.linkedin.com/in/zaeemsarfraz7744/)
-- ðŸ“§ Zaeem.7744@gmail.com
-- ðŸŒ Vaasa, Finland
+- 🔗 [LinkedIn](https://www.linkedin.com/in/zaeemsarfraz7744/)
+- 📧 Zaeem.7744@gmail.com
+- 🌍 Vaasa, Finland
